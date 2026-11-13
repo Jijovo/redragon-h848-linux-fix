@@ -8,12 +8,16 @@
 > **as-is, without warranty**. Review the scripts and confirm the result on
 > your own system before relying on it.
 
-Fixes the broken USB audio on Redragon H848 (and Fuxi-family) headsets on Linux:
+Fixes the broken USB audio on Redragon H848 headsets on Linux:
 
 - Silent below 100 % volume
 - At ~100 % only one ear works
 - The dead ear can flip between boots
 - Bluetooth is unaffected (it never touches the broken path)
+
+Other headsets that share USB ID `040b:0897` — and devices with a similar
+volume-mapping bug — are covered in
+[Using this on other headphones](#using-this-on-other-headphones).
 
 > [!CAUTION]
 > **Read the script before you run it.**
@@ -204,6 +208,250 @@ made before installing.
   `PCM,1`. Run `amixer -c "$CARD" scontrols` to confirm before adapting.
 - **Windows dual-boot**: disable Windows Fast Startup — it can leave the USB
   controller in a weird state and is a common source of audio weirdness.
+
+## Using this on other headphones
+
+**Scope:** everything in this repository was verified only on the Redragon H848
+(dongle and USB cable). The rest of this section is guidance for deciding
+whether the same approach applies to other hardware, and how to adapt it
+manually. No other model has been tested here.
+
+### Does this problem apply to my device?
+
+The signature is a **volume-mapping bug in the device firmware**, not a broken
+headset. It is plausible if most of these are true:
+
+- It connects over **USB** (dongle or cable). Bluetooth and 3.5 mm are different
+  paths and are not affected by anything in this repo.
+- Moving the volume slider has a **discontinuity**: below some threshold there
+  is silence or only one channel, while Windows behaves normally.
+- `pactl list sinks` shows an implausible `Base Volume` — e.g. a maximum of
+  `-0.39 dB` instead of `0.00 dB`, or a range of only a fraction of a dB.
+- `amixer -c <card> contents` shows a `dBminmax` range of a few tenths of a dB
+  across the whole 0–100 register range.
+- Moving the PipeWire slider **writes the hardware registers**. That is the
+  mechanism that breaks: those writes cannot express anything below maximum.
+
+Run these three checks before changing anything:
+
+```bash
+cat /proc/asound/cards                              # note the [card-id] in brackets
+CARD=<card-id>                                      # e.g. headset, FuxiH3
+pactl list sinks | grep -B4 -A6 'Base Volume:'      # wrong/very narrow max dB?
+amixer -c "$CARD" contents | grep -B3 -A3 dBminmax  # tiny range?
+```
+
+Then wiggle the slider and watch the registers:
+
+```bash
+amixer -c "$CARD" contents | grep -A3 'Playback Volume'
+pactl set-sink-volume @DEFAULT_SINK@ 30%
+amixer -c "$CARD" contents | grep -A3 'Playback Volume'   # did it change?
+```
+
+If the registers move when the slider moves, and low values produce silence,
+the `soft-mixer` part of this fix is the relevant piece. If they do **not**
+move, the bug is elsewhere (see
+[Where this will not help](#where-this-will-not-help)).
+
+### Do the install and uninstall scripts work for other headphones?
+
+**No — on purpose.** The scripts are deliberately narrow and fail closed rather
+than silently doing something wrong on hardware that was never tested:
+
+| Script | Works on another headset? | Why |
+|---|---|---|
+| `install.sh` | **No** — refuses to run | It hard-codes the device in four places: the `lsusb -d 040b:0897` presence check, the `awk '/H848/'` card-ID lookup, the `'PCM',0` control check, and the `XiiSound_Technology_Corporation_` match in the rule. On a different card it exits with an error rather than guessing. |
+| `verify.sh` | **No** — reports false failures | It looks for `040b:0897`, a card ID containing `H848`, a sink named `alsa_output.usb-XiiSound…`, and the exact string `Base Volume: 65536 / 100% / 0.00 dB`. A perfectly working other device would still show `[FAIL]`. |
+| `uninstall.sh` | **Yes, if you install your adapted rule under the same filename** | It only deletes two fixed paths (`…/52-h848-soft-mixer.conf` in `~/.config` and `/etc`) and restarts WirePlumber. It never touches `asound.state`, so any hardware volume pinned at maximum stays pinned until the device is replugged. |
+| `configs/52-h848-soft-mixer.conf` | **No** — matches nothing else | The rule matches `device.name` with the glob `~alsa_card.usb-XiiSound_Technology_Corporation_.*`. |
+
+That is also why the script cannot simply be "made generic": the correct
+control names, card ID and device name differ per model, and claiming support
+for hardware that was never tested would be worse than refusing.
+
+### The same USB ID on other models
+
+`040b:0897` (Weltrend / XiiSound) is shared by several headsets that report the
+same 0.00–0.39 dB volume range and the same dual `PCM,0` / `PCM,1` layout:
+
+| Device | ALSA card ID | Notes |
+|---|---|---|
+| Redragon H848 (2.4 GHz dongle) | `headset` | tested here |
+| Redragon H848 (USB cable) | `Headset` | tested here |
+| Redragon H510-PRO / Zeus Pro | `headset` / `Headset` | same layout, same range |
+| Havit Fuxi-H3 | `FuxiH3` | control numbers may be `numid=9` / `numid=10` |
+| Havit Fuxi-H7SE | `FuxiH7SE` | same diagnosis reported |
+
+They are **not** identical: the card ID changes, and on some firmware `PCM,1` is
+a **switch only** (no volume), so `sset 'PCM',1 100%` fails and `sset 'PCM',1 on`
+is the correct form. The approach transfers; the literal commands do not.
+
+### Adapting the fix manually
+
+Only proceed if the checks above matched. Work in this order — each step is
+reversible, and step 7 is the one that catches the reboot regression.
+
+**0. Back up first**
+
+```bash
+CARD=<your card id>
+sudo cp /var/lib/alsa/asound.state ~/asound.state.before
+amixer -c "$CARD" contents > ~/amixer.before.txt
+```
+
+**1. Find the card ID and PipeWire device name**
+
+```bash
+cat /proc/asound/cards
+pactl list cards | grep -E 'Name:|alsa.card_name|device.description'
+```
+
+The `Name:` line is the `device.name` you need in the rule (e.g.
+`alsa_card.usb-…`). Never use the card *number* — it changes between boots.
+
+**2. List the controls and confirm the bogus range**
+
+```bash
+amixer -c "$CARD" scontrols
+amixer -c "$CARD" contents | grep -B2 -A4 dBminmax
+```
+
+Note the control names (`Master`, `PCM`, `Headphone`, `Speaker`, …), their
+indices, and whether each is a volume or a switch. This repo's fix assumes
+`PCM,0` (stereo) plus `PCM,1` (mono master); yours may differ or may have only
+one control.
+
+**3. Pin the hardware at maximum**
+
+```bash
+amixer -c "$CARD" sset 'PCM',0 100% unmute      # adjust the name
+amixer -c "$CARD" sset 'PCM',1 100% unmute      # volume form
+amixer -c "$CARD" sset 'PCM',1 on               # switch-only form
+```
+
+Use `sget` to confirm the result, and keep the physical volume low while
+testing — sound can return at full volume.
+
+**4. Persist it**
+
+```bash
+sudo alsactl store
+```
+
+ALSA keys this state by **card ID**, case-sensitively, so the same headset in
+two connection modes can need two runs. `alsactl store` **preserves entries for
+cards that are currently absent**, so storing once per mode is enough.
+
+**5. Install a rule matching *your* device**
+
+```conf
+# ~/.config/wireplumber/wireplumber.conf.d/52-soft-mixer.conf
+monitor.alsa.rules = [
+  {
+    matches = [
+      { device.name = "~alsa_card.usb-Your_Device.*" }
+    ]
+    actions = {
+      update-props = {
+        api.alsa.soft-mixer = true
+      }
+    }
+  }
+]
+```
+
+Get the pattern from `pactl list cards`. Matching on `device.vendor.id` /
+`device.product.id` is an alternative that survives product-string changes, but
+verify it lands with `pw-dump` before relying on it. Install the file in **both**
+locations — the system-wide copy is what covers the login greeter, for the same
+reason as in [Why a per-user config alone fails](#why-a-per-user-config-alone-fails):
+
+```bash
+mkdir -p ~/.config/wireplumber/wireplumber.conf.d
+install -m644 52-soft-mixer.conf ~/.config/wireplumber/wireplumber.conf.d/
+sudo install -Dm644 52-soft-mixer.conf /etc/wireplumber/wireplumber.conf.d/
+systemctl --user restart wireplumber
+```
+
+Two more documented properties can be tried if `soft-mixer` alone is not enough:
+`api.alsa.ignore-dB = true` (driver reports wrong dB values) and
+`api.alsa.disable-mixer-path = true` (jack-based mixer paths misbehave). Note
+that `api.alsa.enable-hw-volume` appears in some third-party configs but is not
+in the official PipeWire property list — check before copying it.
+
+**6. Verify generically**
+
+```bash
+pactl list sinks | grep -B6 -A6 'Base Volume:'
+amixer -c "$CARD" contents | grep -A3 'Playback Volume'
+pactl set-sink-volume @DEFAULT_SINK@ 20%
+amixer -c "$CARD" contents | grep -A3 'Playback Volume'
+```
+
+Make sure the headset is the default sink first (`wpctl status`). Success looks
+like: `HW_VOLUME_CTRL` is gone from `Flags:`, the slider still changes loudness,
+and the hardware registers **do not change** while the slider moves. On this
+device `Base Volume` also becomes `100% / 0.00 dB`; on other hardware that value
+may stay odd even when the fix works, so judge by the registers.
+
+**7. Reboot and re-test**
+
+A per-user-only installation can look fine until the next boot, when the
+display manager's own PipeWire instance rewrites the registers. If it regresses
+after reboot but works after replug, the `/etc` rule is missing or not matching.
+
+**8. Rolling back a manual adaptation**
+
+```bash
+sudo cp ~/asound.state.before /var/lib/alsa/asound.state
+sudo alsactl restore
+rm -f ~/.config/wireplumber/wireplumber.conf.d/52-soft-mixer.conf
+sudo rm -f /etc/wireplumber/wireplumber.conf.d/52-soft-mixer.conf
+systemctl --user restart wireplumber
+```
+
+Replug the device afterwards so the firmware returns to its own defaults.
+
+### Where this will not help
+
+- **Vendor-HID volume** (e.g. SteelSeries Arctis on some models): there is no
+  USB Audio Class volume control to disable, so `soft-mixer` has nothing to act
+  on.
+- **Sticky/fake `GET_CUR` firmware** (e.g. Logitech PRO X 2 `046d:0af7`): the
+  `soft-mixer` properties do apply, yet PipeWire still writes the mixer; it
+  needs a kernel quirk (`mixer_get_cur_broken`) instead. Disabling the quirk
+  makes the device beep on every volume step.
+- **Devices with no hardware volume control at all**: nothing to pin, nothing to
+  bypass.
+- **Genuine kernel/driver regressions**: one Razer soundbar was fixed by
+  `soft-mixer` on one stack and not on another kernel branch, where only a
+  downgrade worked. Treat this as a workaround for firmware behaviour, not a
+  universal cure.
+- **Bluetooth and analog connections**: unrelated audio paths.
+- **Audio that is silent for a different reason** (wrong profile, muted switch
+  at the ALSA level, suspended device): the checks in
+  [Does this problem apply to my device?](#does-this-problem-apply-to-my-device)
+  will not match; see the generic USB-audio troubleshooting instead.
+
+### Reports on other hardware
+
+Same class of bug, same remedy, different devices:
+
+- [Jabra Evolve3 65 on Linux](https://schnouki.net/post/2026/jabra-evolve3-65-on-linux)
+  — abrupt silence below ~10 %, fixed with one `soft-mixer` rule.
+- [Razer Leviathan V2 X (CachyOS forum)](https://discuss.cachyos.org/t/razer-leviathan-v2-x-audio-cuts-off-muted-completely-below-34-volume-after-updating-to-kernel-7-1-x/31906)
+  — silent below ~34 %, fixed with `soft-mixer` plus pinning the bar at 100 %.
+- [USB headset mutes below 25 % (Arch BBS)](https://bbs.archlinux.org/viewtopic.php?pid=2247677)
+  — same diagnosis and fix on unrelated hardware.
+- [Havit Fuxi-H3 on Fedora 44](https://discussion.fedoraproject.org/t/havit-fuxi-h3-fix-for-silent-audio-and-right-channel-dropouts-on-fedora-44/205348)
+  — same `040b:0897` dongle family.
+- [linuxmint/linuxmint#822](https://github.com/linuxmint/linuxmint/issues/822)
+  — H848/Fuxi-H7SE diagnosis, including the proposal for a kernel quirk.
+
+If you get this working on another model, a report with the card ID,
+`device.name`, control names, distro/audio-stack versions and before/after
+`amixer` values is welcome — scrub serial numbers and MAC addresses first.
 
 ## Repo layout
 
