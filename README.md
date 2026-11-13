@@ -10,9 +10,9 @@
 
 Fixes the broken USB audio on Redragon H848 (and Fuxi-family) headsets on Linux:
 
-- silent below 100 % volume
-- at ~100 % only one ear works
-- the dead ear can flip between boots
+- Silent below 100 % volume
+- At ~100 % only one ear works
+- The dead ear can flip between boots
 - Bluetooth is unaffected (it never touches the broken path)
 
 > [!CAUTION]
