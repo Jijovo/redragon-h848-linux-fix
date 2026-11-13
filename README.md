@@ -1,17 +1,26 @@
 # Redragon H848 / XiiSound `040b:0897` — Linux audio fix
 
+> [!WARNING]
+> **AI disclosure.** This repository — diagnosis, scripts, and documentation —
+> was produced with the help of an AI coding assistant (DeepSeek V4.1 Flash via
+> OpenCode), working from live diagnostics on a physical machine. The fix was
+> verified on the hardware listed below, but everything here is provided
+> **as-is, without warranty**. Review the scripts and confirm the result on
+> your own system before relying on it.
+
 Fixes the broken USB audio on Redragon H848 (and Fuxi-family) headsets on Linux:
 
-- 🔊 **silent below 100 %** volume
-- 🎧 **at ~100 % only one ear** works
-- 🔁 the dead ear can **flip between boots**
-- 🔵 **Bluetooth is fine** (it never touches the broken path)
+- silent below 100 % volume
+- at ~100 % only one ear works
+- the dead ear can flip between boots
+- Bluetooth is unaffected (it never touches the broken path)
 
-> ## ⚠️ Read the script before you run it
+> [!CAUTION]
+> **Read the script before you run it.**
 >
 > `install.sh` modifies your audio configuration and needs `sudo` for two steps.
-> **Do not** pipe it into a shell (`curl … | bash`). Clone or download the repo,
-> open `install.sh`, read every line, then run it.
+> **Do not** pipe it into a shell (`curl … | bash`). Clone or download the
+> repo, open `install.sh`, read every line, then run it.
 >
 > This is a **hardware-firmware workaround**, not a driver fix. It is fully
 > reversible with `uninstall.sh`, but you should know what it does first.
@@ -22,7 +31,7 @@ should behave the same.
 
 ---
 
-## TL;DR
+## Quick start
 
 ```bash
 git clone git@github.com:Jijovo/redragon-h848-linux-fix.git
@@ -152,18 +161,19 @@ mode. Never delete either entry.
 
 ## Why a per-user config alone fails
 
-This burned us once: everything worked until reboot, then one ear died again.
+A per-user-only installation can appear to work until the first reboot, after
+which one channel may go silent again.
 
-Your login manager — `plasmalogin` (KDE Plasma Login Manager), SDDM, GDM, etc.
-— starts its own PipeWire/WirePlumber **as the greeter user, before you log
-in**. That instance has a different `$HOME`, never sees your `~/.config` rule,
-and writes the broken hardware volume once per boot. Your session then inherits
+The login manager — `plasmalogin` (KDE Plasma Login Manager), SDDM, GDM, etc.
+— starts its own PipeWire/WirePlumber **as the greeter user, before login**.
+That instance has a different `$HOME`, never sees the `~/.config` rule, and
+writes the broken hardware volume once per boot. The user session then inherits
 the damaged registers.
 
 That is why the rule is also installed in `/etc/wireplumber/wireplumber.conf.d/`,
 which applies to every user including the greeter.
 
-Replug works but reboot fails? This is the reason.
+If replug works but reboot does not, this is the reason.
 
 ## Undo
 
@@ -175,8 +185,8 @@ It removes both WirePlumber rules and restarts WirePlumber. The saved
 `asound.state` keeps the hardware at maximum, which is harmless; replug the
 headset to return it to firmware defaults.
 
-For a full manual rollback, restore `/var/lib/alsa/asound.state` from your own
-backup (if you made one before installing).
+For a full manual rollback, restore `/var/lib/alsa/asound.state` from a backup
+made before installing.
 
 ## Troubleshooting
 
